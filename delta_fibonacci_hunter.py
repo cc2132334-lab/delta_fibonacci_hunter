@@ -7,9 +7,7 @@ import requests
 BOT_TOKEN = "8626042409:AAHElsiJD8_Jk9R7r5VHUj8fPjcl8Meacp4"
 CHAT_ID = "706694019"
 
-# Symbols (BTC & ETH)
 DELTA_SYMBOLS = ["BTCUSD", "ETHUSD"]
-LOOKBACK = 35
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -17,13 +15,13 @@ def send_telegram(msg):
     try:
         r = requests.post(url, data=payload, timeout=15)
         if r.status_code == 200:
-            print("Telegram Alert Sent!")
+            print("Telegram Alert Sent Successfully!")
         else:
-            print(f"Telegram Error: {r.text}")
+            print(f"Telegram API Error: {r.text}")
     except Exception as e:
         print(f"Connection Error: {e}")
 
-def get_delta_candles(symbol, resolution="5m", count=80):
+def get_delta_candles(symbol, resolution="5m", count=288):
     end_time = int(time.time())
     start_time = end_time - (count * 5 * 60)
         
@@ -70,18 +68,27 @@ def get_delta_candles(symbol, resolution="5m", count=80):
 
 def run_fibonacci_scanner():
     ist = pytz.timezone('Asia/Kolkata')
-    alerts = []
-    print(f"[{datetime.now(ist).strftime('%H:%M:%S')}] Scanning Delta 5m Candles...")
+    today_str = datetime.now(ist).strftime("%Y-%m-%d")
+    print(f"[{datetime.now(ist).strftime('%H:%M:%S')}] Scanning Intraday Swings...")
 
     for sym in DELTA_SYMBOLS:
         try:
-            candles = get_delta_candles(sym, resolution="5m", count=80)
-            if len(candles) < LOOKBACK + 5:
+            candles = get_delta_candles(sym, resolution="5m", count=288)
+            if len(candles) < 20:
                 continue
 
-            # Latest Completed 5m Candle (-2) & Previous Candle (-3)
-            latest = candles[-2]
-            prev = candles[-3]
+            # આજના દિવસની કેન્ડલ્સ (00:00 IST પછી)
+            today_candles = []
+            for c in candles:
+                c_date = datetime.fromtimestamp(c["time"], ist).strftime("%Y-%m-%d")
+                if c_date == today_str:
+                    today_candles.append(c)
+
+            eval_candles = today_candles if len(today_candles) >= 15 else candles[-60:]
+
+            # લેટેસ્ટ પૂરી થયેલી કેન્ડલ (-2) અને અગાઉની (-3)
+            latest = eval_candles[-2]
+            prev = eval_candles[-3]
 
             c_time = datetime.fromtimestamp(latest["time"], ist).strftime("%H:%M")
             c_open = latest["open"]
@@ -89,81 +96,101 @@ def run_fibonacci_scanner():
             c_low = latest["low"]
             c_close = latest["close"]
 
-            # 35-Candle Swing Detection Window
-            window = candles[-LOOKBACK-2:-2]
-            highs = [x["high"] for x in window]
-            lows = [x["low"] for x in window]
-            
-            swing_high = max(highs)
-            swing_low = min(lows)
-            idx_high = highs.index(swing_high)
-            idx_low = lows.index(swing_low)
-            swing_range = swing_high - swing_low
-
-            if swing_range <= 0:
+            search_window = eval_candles[:-2]
+            if len(search_window) < 10:
                 continue
 
-            # ==============================
-            # 🟢 BUY SETUP (Uptrend Pullback)
-            # ==============================
-            if idx_high > idx_low:
-                fib_50 = swing_high - (0.50 * swing_range)
-                fib_618 = swing_high - (0.618 * swing_range)
+            # ==========================================
+            # 🟢 BUY SETUP (Day Low પછીનો Swing High)
+            # ==========================================
+            all_lows = [x["low"] for x in search_window]
+            day_low = min(all_lows)
+            day_low_idx = all_lows.index(day_low)
 
-                # શરત: કિંમત 0.50 નીચે આવી હોય અને 0.618 લેવલથી ગ્રીન કેન્ડલ ક્લોઝ આપે
-                touched_zone = (prev["low"] <= fib_50) or (c_low <= fib_50)
-                held_above_618 = (c_close >= fib_618 * 0.998)
-                is_green = (c_close > c_open)
+            # Day Low પછી બનેલી કેન્ડલ્સમાંથી Swing High શોધો
+            post_low_window = search_window[day_low_idx:]
+            if len(post_low_window) >= 2:
+                post_low_highs = [x["high"] for x in post_low_window]
+                swing_high = max(post_low_highs)
+                swing_high_rel_idx = post_low_highs.index(swing_high)
+                swing_high_idx = day_low_idx + swing_high_rel_idx
 
-                if touched_zone and held_above_618 and is_green:
-                    alert_text = (
-                        f"🎯 *FIBONACCI 0.5 - 0.618 BUY SIGNAL*\n"
-                        f"💎 *Pair:* `{sym}` (5-Min)\n"
-                        f"🟢 *Signal:* *STRONG BUY (Bullish Bounce)*\n"
-                        f"📈 *Swing High:* `${swing_high:,.2f}`\n"
-                        f"📉 *Swing Low:* `${swing_low:,.2f}`\n"
-                        f"🟡 *Fib 50.0%:* `${fib_50:,.2f}`\n"
-                        f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
-                        f"💰 *Entry:* `${c_close:,.2f}`\n"
-                        f"⏱ *Time:* `{c_time} IST`"
-                    )
-                    alerts.append(alert_text)
+                # Swing High એ Day Low પછી બનેલો હોવો જોઈએ
+                if swing_high_idx > day_low_idx:
+                    time_day_low = datetime.fromtimestamp(search_window[day_low_idx]["time"], ist).strftime("%H:%M")
+                    time_swing_high = datetime.fromtimestamp(search_window[swing_high_idx]["time"], ist).strftime("%H:%M")
 
-            # ==============================
-            # 🔴 SELL SETUP (Downtrend Pullback)
-            # ==============================
-            elif idx_low > idx_high:
-                fib_50 = swing_low + (0.50 * swing_range)
-                fib_618 = swing_low + (0.618 * swing_range)
+                    swing_range = swing_high - day_low
+                    if swing_range > 0:
+                        fib_50 = swing_high - (0.50 * swing_range)
+                        fib_618 = swing_high - (0.618 * swing_range)
 
-                # શરત: કિંમત 0.50 ઉપર ગઈ હોય અને 0.618 લેવલથી રેડ કેન્ડલ ક્લોઝ આપે
-                touched_zone = (prev["high"] >= fib_50) or (c_high >= fib_50)
-                held_below_618 = (c_close <= fib_618 * 1.002)
-                is_red = (c_close < c_open)
+                        touched_zone = (prev["low"] <= fib_50) or (c_low <= fib_50)
+                        held_above_618 = (c_close >= fib_618 * 0.998)
+                        is_green = (c_close > c_open)
 
-                if touched_zone and held_below_618 and is_red:
-                    alert_text = (
-                        f"🎯 *FIBONACCI 0.5 - 0.618 SELL SIGNAL*\n"
-                        f"💎 *Pair:* `{sym}` (5-Min)\n"
-                        f"🔴 *Signal:* *STRONG SELL (Bearish Rejection)*\n"
-                        f"📈 *Swing High:* `${swing_high:,.2f}`\n"
-                        f"📉 *Swing Low:* `${swing_low:,.2f}`\n"
-                        f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
-                        f"🟡 *Fib 50.0%:* `${fib_50:,.2f}`\n"
-                        f"💰 *Entry:* `${c_close:,.2f}`\n"
-                        f"⏱ *Time:* `{c_time} IST`"
-                    )
-                    alerts.append(alert_text)
+                        if touched_zone and held_above_618 and is_green:
+                            alert_buy = (
+                                f"🎯 *FIBONACCI BUY SIGNAL*\n"
+                                f"💎 *Pair:* `{sym}` (5-Min)\n"
+                                f"🟢 *Signal:* *STRONG BUY (Pullback from Day Low)*\n"
+                                f"📉 *Day Low:* `${day_low:,.2f}` _(Time: {time_day_low})_\n"
+                                f"📈 *Swing High:* `${swing_high:,.2f}` _(Time: {time_swing_high})_\n"
+                                f"🟡 *Fib 50.0%:* `${fib_50:,.2f}`\n"
+                                f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
+                                f"💰 *Entry / Close:* `${c_close:,.2f}`\n"
+                                f"⏱ *Trigger Candle:* `{c_time} IST`"
+                            )
+                            send_telegram(alert_buy)
+                            continue
+
+            # ==========================================
+            # 🔴 SELL SETUP (Day High પછીનો Swing Low)
+            # ==========================================
+            all_highs = [x["high"] for x in search_window]
+            day_high = max(all_highs)
+            day_high_idx = all_highs.index(day_high)
+
+            # Day High પછી બનેલી કેન્ડલ્સમાંથી Swing Low શોધો
+            post_high_window = search_window[day_high_idx:]
+            if len(post_high_window) >= 2:
+                post_high_lows = [x["low"] for x in post_high_window]
+                swing_low = min(post_high_lows)
+                swing_low_rel_idx = post_high_lows.index(swing_low)
+                swing_low_idx = day_high_idx + swing_low_rel_idx
+
+                # Swing Low એ Day High પછી બનેલો હોવો જોઈએ
+                if swing_low_idx > day_high_idx:
+                    time_day_high = datetime.fromtimestamp(search_window[day_high_idx]["time"], ist).strftime("%H:%M")
+                    time_swing_low = datetime.fromtimestamp(search_window[swing_low_idx]["time"], ist).strftime("%H:%M")
+
+                    swing_range = day_high - swing_low
+                    if swing_range > 0:
+                        fib_50 = swing_low + (0.50 * swing_range)
+                        fib_618 = swing_low + (0.618 * swing_range)
+
+                        touched_zone = (prev["high"] >= fib_50) or (c_high >= fib_50)
+                        held_below_618 = (c_close <= fib_618 * 1.002)
+                        is_red = (c_close < c_open)
+
+                        if touched_zone and held_below_618 and is_red:
+                            alert_sell = (
+                                f"🎯 *FIBONACCI SELL SIGNAL*\n"
+                                f"💎 *Pair:* `{sym}` (5-Min)\n"
+                                f"🔴 *Signal:* *STRONG SELL (Pullback from Day High)*\n"
+                                f"📈 *Day High:* `${day_high:,.2f}` _(Time: {time_day_high})_\n"
+                                f"📉 *Swing Low:* `${swing_low:,.2f}` _(Time: {time_swing_low})_\n"
+                                f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
+                                f"🟡 *Fib 50.0%:* `${fib_50:,.2f}`\n"
+                                f"💰 *Entry / Close:* `${c_close:,.2f}`\n"
+                                f"⏱ *Trigger Candle:* `{c_time} IST`"
+                            )
+                            send_telegram(alert_sell)
+                            continue
 
         except Exception as e:
             print(f"Error checking {sym}: {e}")
             continue
-
-    if alerts:
-        msg = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n".join(alerts)
-        send_telegram(msg)
-    else:
-        print("No setups matched on the latest 5m candle.")
 
 if __name__ == "__main__":
     run_fibonacci_scanner()
