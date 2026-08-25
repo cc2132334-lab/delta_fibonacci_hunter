@@ -1,6 +1,5 @@
 import time
-from datetime import datetime
-import pytz
+from datetime import datetime, timezone
 import requests
 
 # --- TELEGRAM CONFIG ---
@@ -21,7 +20,7 @@ def send_telegram(msg):
     except Exception as e:
         print(f"Connection Error: {e}")
 
-def get_delta_candles(symbol, resolution="5m", count=288):
+def get_delta_candles(symbol, resolution="5m", count=300):
     end_time = int(time.time())
     start_time = end_time - (count * 5 * 60)
         
@@ -60,133 +59,228 @@ def get_delta_candles(symbol, resolution="5m", count=288):
                     "close": float(c[4]),
                     "volume": float(c[5])
                 })
-        candles.reverse()  # Oldest to Newest
+        candles.reverse()  # Oldest -> Newest
         return candles
     except Exception as e:
         print(f"Fetch Error ({symbol}): {e}")
         return []
 
 def run_fibonacci_scanner():
-    ist = pytz.timezone('Asia/Kolkata')
-    today_str = datetime.now(ist).strftime("%Y-%m-%d")
-    print(f"[{datetime.now(ist).strftime('%H:%M:%S')}] Scanning Intraday Swings...")
+    now_utc = datetime.now(timezone.utc)
+    start_of_day_utc = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
+    start_of_day_ts = int(start_of_day_utc.timestamp())
+
+    print(f"[{now_utc.strftime('%H:%M:%S')} UTC] Scanning Swings & Retracements...")
 
     for sym in DELTA_SYMBOLS:
         try:
-            candles = get_delta_candles(sym, resolution="5m", count=288)
+            candles = get_delta_candles(sym, resolution="5m", count=300)
             if len(candles) < 20:
                 continue
 
-            # આજના દિવસની કેન્ડલ્સ (00:00 IST પછી)
-            today_candles = []
-            for c in candles:
-                c_date = datetime.fromtimestamp(c["time"], ist).strftime("%Y-%m-%d")
-                if c_date == today_str:
-                    today_candles.append(c)
+            today_candles = [c for c in candles if c["time"] >= start_of_day_ts]
+            eval_candles = today_candles if len(today_candles) >= 12 else candles[-60:]
 
-            eval_candles = today_candles if len(today_candles) >= 15 else candles[-60:]
-
-            # લેટેસ્ટ પૂરી થયેલી કેન્ડલ (-2) અને અગાઉની (-3)
             latest = eval_candles[-2]
-            prev = eval_candles[-3]
-
-            c_time = datetime.fromtimestamp(latest["time"], ist).strftime("%H:%M")
+            c_time = datetime.fromtimestamp(latest["time"], timezone.utc).strftime("%H:%M")
             c_open = latest["open"]
             c_high = latest["high"]
             c_low = latest["low"]
             c_close = latest["close"]
 
             search_window = eval_candles[:-2]
-            if len(search_window) < 10:
+            if len(search_window) < 6:
                 continue
 
-            # ==========================================
-            # 🟢 BUY SETUP (Day Low પછીનો Swing High)
-            # ==========================================
-            all_lows = [x["low"] for x in search_window]
-            day_low = min(all_lows)
-            day_low_idx = all_lows.index(day_low)
-
-            # Day Low પછી બનેલી કેન્ડલ્સમાંથી Swing High શોધો
-            post_low_window = search_window[day_low_idx:]
-            if len(post_low_window) >= 2:
-                post_low_highs = [x["high"] for x in post_low_window]
-                swing_high = max(post_low_highs)
-                swing_high_rel_idx = post_low_highs.index(swing_high)
-                swing_high_idx = day_low_idx + swing_high_rel_idx
-
-                # Swing High એ Day Low પછી બનેલો હોવો જોઈએ
-                if swing_high_idx > day_low_idx:
-                    time_day_low = datetime.fromtimestamp(search_window[day_low_idx]["time"], ist).strftime("%H:%M")
-                    time_swing_high = datetime.fromtimestamp(search_window[swing_high_idx]["time"], ist).strftime("%H:%M")
-
-                    swing_range = swing_high - day_low
-                    if swing_range > 0:
-                        fib_50 = swing_high - (0.50 * swing_range)
-                        fib_618 = swing_high - (0.618 * swing_range)
-
-                        touched_zone = (prev["low"] <= fib_50) or (c_low <= fib_50)
-                        held_above_618 = (c_close >= fib_618 * 0.998)
-                        is_green = (c_close > c_open)
-
-                        if touched_zone and held_above_618 and is_green:
-                            alert_buy = (
-                                f"🎯 *FIBONACCI BUY SIGNAL*\n"
-                                f"💎 *Pair:* `{sym}` (5-Min)\n"
-                                f"🟢 *Signal:* *STRONG BUY (Pullback from Day Low)*\n"
-                                f"📉 *Day Low:* `${day_low:,.2f}` _(Time: {time_day_low})_\n"
-                                f"📈 *Swing High:* `${swing_high:,.2f}` _(Time: {time_swing_high})_\n"
-                                f"🟡 *Fib 50.0%:* `${fib_50:,.2f}`\n"
-                                f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
-                                f"💰 *Entry / Close:* `${c_close:,.2f}`\n"
-                                f"⏱ *Trigger Candle:* `{c_time} IST`"
-                            )
-                            send_telegram(alert_buy)
-                            continue
-
-            # ==========================================
-            # 🔴 SELL SETUP (Day High પછીનો Swing Low)
-            # ==========================================
             all_highs = [x["high"] for x in search_window]
             day_high = max(all_highs)
             day_high_idx = all_highs.index(day_high)
 
-            # Day High પછી બનેલી કેન્ડલ્સમાંથી Swing Low શોધો
+            all_lows = [x["low"] for x in search_window]
+            day_low = min(all_lows)
+            day_low_idx = all_lows.index(day_low)
+
+            # ==========================================
+            # 🔴 SELL SETUP (Day High ➔ Progressive Swing Low)
+            # ==========================================
             post_high_window = search_window[day_high_idx:]
-            if len(post_high_window) >= 2:
-                post_high_lows = [x["low"] for x in post_high_window]
-                swing_low = min(post_high_lows)
-                swing_low_rel_idx = post_high_lows.index(swing_low)
+            if len(post_high_window) >= 3:
+                # High પછી બનેલા મિનીમમ સ્વીંગ લો પોઈન્ટ્સ શોધવા
+                post_lows = [x["low"] for x in post_high_window]
+                
+                # લેટેસ્ટ સ્વિંગ લો (જેના પરથી ફિબોનાચી ડ્રો થશે)
+                swing_low = min(post_lows)
+                swing_low_rel_idx = post_lows.index(swing_low)
                 swing_low_idx = day_high_idx + swing_low_rel_idx
 
-                # Swing Low એ Day High પછી બનેલો હોવો જોઈએ
-                if swing_low_idx > day_high_idx:
-                    time_day_high = datetime.fromtimestamp(search_window[day_high_idx]["time"], ist).strftime("%H:%M")
-                    time_swing_low = datetime.fromtimestamp(search_window[swing_low_idx]["time"], ist).strftime("%H:%M")
+                if swing_low_idx > day_high_idx and (len(search_window) - 1) > swing_low_idx:
+                    time_day_high = datetime.fromtimestamp(search_window[day_high_idx]["time"], timezone.utc).strftime("%H:%M")
+                    time_swing_low = datetime.fromtimestamp(search_window[swing_low_idx]["time"], timezone.utc).strftime("%H:%M")
 
                     swing_range = day_high - swing_low
                     if swing_range > 0:
                         fib_50 = swing_low + (0.50 * swing_range)
                         fib_618 = swing_low + (0.618 * swing_range)
 
-                        touched_zone = (prev["high"] >= fib_50) or (c_high >= fib_50)
-                        held_below_618 = (c_close <= fib_618 * 1.002)
-                        is_red = (c_close < c_open)
+                        # Swing Low બન્યા પછીની કેન્ડલ્સ
+                        pullback_candles = search_window[swing_low_idx:]
+                        
+                        # ૧. ભાવ 0.50 - 0.618 ઝોનની અંદર ક્લોઝ આપી ચૂક્યો હોવો જોઈએ
+                        closed_inside_zone = any(
+                            (x["close"] >= fib_50 and x["close"] <= fib_618) for x in pullback_candles
+                        )
 
-                        if touched_zone and held_below_618 and is_red:
-                            alert_sell = (
-                                f"🎯 *FIBONACCI SELL SIGNAL*\n"
+                        # ૨. જો 0.618 ની ઉપર બોડી ક્લોઝ આપી દે તો SETUP INVALID ALERT
+                        if closed_inside_zone and any(x["close"] > (fib_618 * 1.001) for x in pullback_candles):
+                            alert_invalid_sell = (
+                                f"⚠️ *FIBONACCI SELL SETUP INVALIDATED*\n"
                                 f"💎 *Pair:* `{sym}` (5-Min)\n"
-                                f"🔴 *Signal:* *STRONG SELL (Pullback from Day High)*\n"
-                                f"📈 *Day High:* `${day_high:,.2f}` _(Time: {time_day_high})_\n"
-                                f"📉 *Swing Low:* `${swing_low:,.2f}` _(Time: {time_swing_low})_\n"
+                                f"❌ *Reason:* Candle closed above 0.618 level\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📈 *Day High:* `${day_high:,.2f}` _({time_day_high} UTC)_\n"
+                                f"📉 *Swing Low:* `${swing_low:,.2f}` _({time_swing_low} UTC)_\n"
                                 f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
-                                f"🟡 *Fib 50.0%:* `${fib_50:,.2f}`\n"
-                                f"💰 *Entry / Close:* `${c_close:,.2f}`\n"
-                                f"⏱ *Trigger Candle:* `{c_time} IST`"
+                                f"💥 *Candle Close:* `${c_close:,.2f}`\n"
+                                f"⏱ *Invalid Time:* `{c_time} UTC`"
                             )
-                            send_telegram(alert_sell)
+                            send_telegram(alert_invalid_sell)
                             continue
+
+                        # ૩. કન્ફર્મેશન: કેન્ડલ 0.50 ની નીચે રેડ ક્લોઝ આપે
+                        if closed_inside_zone and c_close <= fib_50 and c_close < c_open:
+                            entry_price = c_low
+
+                            # SL Logic
+                            zone_highs = [x["high"] for x in pullback_candles] + [c_high]
+                            max_pullback_high = max(zone_highs)
+
+                            if max_pullback_high > fib_618:
+                                stop_loss = max_pullback_high
+                                sl_type = f"Spike High (${stop_loss:,.2f})"
+                            else:
+                                stop_loss = fib_618
+                                sl_type = f"Fib 0.618 Level (${stop_loss:,.2f})"
+
+                            risk = stop_loss - entry_price
+                            if risk > 0:
+                                t1 = entry_price - (1.0 * risk)
+                                t2 = entry_price - (2.0 * risk)
+                                t3 = entry_price - (3.0 * risk)
+                                t4 = entry_price - (4.0 * risk)
+                                t5 = entry_price - (5.0 * risk)
+
+                                alert_sell = (
+                                    f"🎯 *FIBONACCI SELL SIGNAL*\n"
+                                    f"💎 *Pair:* `{sym}` (5-Min)\n"
+                                    f"🔴 *Signal:* *STRONG SELL (Pullback Confirmed)*\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📈 *Day High:* `${day_high:,.2f}` _({time_day_high} UTC)_\n"
+                                    f"📉 *Swing Low:* `${swing_low:,.2f}` _({time_swing_low} UTC)_\n"
+                                    f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
+                                    f"🟡 *Fib 50.0%:* `${fib_50:,.2f}`\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🔻 *Entry (Candle Low):* `${entry_price:,.2f}`\n"
+                                    f"🛑 *Stop Loss:* `${stop_loss:,.2f}` _({sl_type})_\n"
+                                    f"📏 *Risk (1R):* `${risk:,.2f}`\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🎯 *TARGET LEVELS (1:1 to 1:5):*\n"
+                                    f"  • *1:1 Target:* `${t1:,.2f}`\n"
+                                    f"  • *1:2 Target:* `${t2:,.2f}`\n"
+                                    f"  • *1:3 Target:* `${t3:,.2f}`\n"
+                                    f"  • *1:4 Target:* `${t4:,.2f}`\n"
+                                    f"  • *1:5 Target:* `${t5:,.2f}`\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"⏱ *Entry Candle Time:* `{c_time} UTC`"
+                                )
+                                send_telegram(alert_sell)
+                                continue
+
+            # ==========================================
+            # 🟢 BUY SETUP (Day Low ➔ Progressive Swing High)
+            # ==========================================
+            post_low_window = search_window[day_low_idx:]
+            if len(post_low_window) >= 3:
+                post_highs = [x["high"] for x in post_low_window]
+                swing_high = max(post_highs)
+                swing_high_rel_idx = post_highs.index(swing_high)
+                swing_high_idx = day_low_idx + swing_high_rel_idx
+
+                if swing_high_idx > day_low_idx and (len(search_window) - 1) > swing_high_idx:
+                    time_day_low = datetime.fromtimestamp(search_window[day_low_idx]["time"], timezone.utc).strftime("%H:%M")
+                    time_swing_high = datetime.fromtimestamp(search_window[swing_high_idx]["time"], timezone.utc).strftime("%H:%M")
+
+                    swing_range = swing_high - day_low
+                    if swing_range > 0:
+                        fib_50 = swing_high - (0.50 * swing_range)
+                        fib_618 = swing_high - (0.618 * swing_range)
+
+                        pullback_candles = search_window[swing_high_idx:]
+                        
+                        closed_inside_zone = any(
+                            (x["close"] <= fib_50 and x["close"] >= fib_618) for x in pullback_candles
+                        )
+
+                        if closed_inside_zone and any(x["close"] < (fib_618 * 0.999) for x in pullback_candles):
+                            alert_invalid_buy = (
+                                f"⚠️ *FIBONACCI BUY SETUP INVALIDATED*\n"
+                                f"💎 *Pair:* `{sym}` (5-Min)\n"
+                                f"❌ *Reason:* Candle closed below 0.618 level\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📉 *Day Low:* `${day_low:,.2f}` _({time_day_low} UTC)_\n"
+                                f"📈 *Swing High:* `${swing_high:,.2f}` _({time_swing_high} UTC)_\n"
+                                f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
+                                f"💥 *Candle Close:* `${c_close:,.2f}`\n"
+                                f"⏱ *Invalid Time:* `{c_time} UTC`"
+                            )
+                            send_telegram(alert_invalid_buy)
+                            continue
+
+                        if closed_inside_zone and c_close >= fib_50 and c_close > c_open:
+                            entry_price = c_high
+
+                            zone_lows = [x["low"] for x in pullback_candles] + [c_low]
+                            min_pullback_low = min(zone_lows)
+
+                            if min_pullback_low < fib_618:
+                                stop_loss = min_pullback_low
+                                sl_type = f"Spike Low (${stop_loss:,.2f})"
+                            else:
+                                stop_loss = fib_618
+                                sl_type = f"Fib 0.618 Level (${stop_loss:,.2f})"
+
+                            risk = entry_price - stop_loss
+                            if risk > 0:
+                                t1 = entry_price + (1.0 * risk)
+                                t2 = entry_price + (2.0 * risk)
+                                t3 = entry_price + (3.0 * risk)
+                                t4 = entry_price + (4.0 * risk)
+                                t5 = entry_price + (5.0 * risk)
+
+                                alert_buy = (
+                                    f"🎯 *FIBONACCI BUY SIGNAL*\n"
+                                    f"💎 *Pair:* `{sym}` (5-Min)\n"
+                                    f"🟢 *Signal:* *STRONG BUY (Pullback Confirmed)*\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📉 *Day Low:* `${day_low:,.2f}` _({time_day_low} UTC)_\n"
+                                    f"📈 *Swing High:* `${swing_high:,.2f}` _({time_swing_high} UTC)_\n"
+                                    f"🟡 *Fib 50.0%:* `${fib_50:,.2f}`\n"
+                                    f"🟠 *Fib 61.8%:* `${fib_618:,.2f}`\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🚀 *Entry (Candle High):* `${entry_price:,.2f}`\n"
+                                    f"🛑 *Stop Loss:* `${stop_loss:,.2f}` _({sl_type})_\n"
+                                    f"📏 *Risk (1R):* `${risk:,.2f}`\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🎯 *TARGET LEVELS (1:1 to 1:5):*\n"
+                                    f"  • *1:1 Target:* `${t1:,.2f}`\n"
+                                    f"  • *1:2 Target:* `${t2:,.2f}`\n"
+                                    f"  • *1:3 Target:* `${t3:,.2f}`\n"
+                                    f"  • *1:4 Target:* `${t4:,.2f}`\n"
+                                    f"  • *1:5 Target:* `${t5:,.2f}`\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"⏱ *Entry Candle Time:* `{c_time} UTC`"
+                                )
+                                send_telegram(alert_buy)
+                                continue
 
         except Exception as e:
             print(f"Error checking {sym}: {e}")
